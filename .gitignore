@@ -23,3 +23,6 @@ ENV/
 *.DS_Store
 *.bak
 *.swp
+
+# Visual Studio Code
+.vscode/

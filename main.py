@@ -49,7 +49,7 @@ async def fetch_data(symbol, session):
         return df
 
 
-async def main():
+async def main(stock_symbols: list[str]):
     async with aiohttp.ClientSession() as session:
         tasks = [fetch_data(symbol, session) for symbol in stock_symbols]
         results = await asyncio.gather(*tasks)
@@ -62,16 +62,40 @@ async def main():
     )
 
     # Write the data to an Excel file called AlphaQuery.xlsx
-    with pd.ExcelWriter("AlphaQuery.xlsx") as writer:
-        combined_data.to_excel(writer, index=False)
+    while True:
+        try:
+            save_path = input(
+                "Enter the path to save the Excel file, (eg: results.xlsx): "
+            )
+            with pd.ExcelWriter(save_path) as writer:
+                combined_data.to_excel(writer, index=False)
+        except PermissionError:
+            print("Please close the Excel file before saving")
+        except Exception as e:
+            print(e)
+        else:
+            print("Excel file saved successfully")
+            break
 
 
 if __name__ == "__main__":
     # Read the Excel file and extract the stock symbols from the Stock List tab
     # Set current working directory to the directory of this file
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    path = input("Enter the path to the Excel file: ")
-    df = pd.read_excel(path, sheet_name="Stock List")
-    stock_symbols = df["Symbol"].tolist()
 
-    asyncio.run(main())
+    while True:
+        try:
+            file_path = input("Enter the path to the Excel file: ")
+            df = pd.read_excel(file_path, sheet_name="Stock List")
+            stock_symbols = df["Symbol"].tolist()
+        except FileNotFoundError:
+            print("The path does not exist")
+        except KeyError:
+            print("The Excel file does not contain a Stock List tab")
+        except Exception as e:
+            print(e)
+        else:
+            print("Excel file loaded successfully")
+            break
+
+    asyncio.run(main(stock_symbols))
