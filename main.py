@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import aiohttp
 import asyncio
@@ -5,9 +6,26 @@ import pandas as pd
 from io import StringIO
 from bs4 import BeautifulSoup
 
+from progress import printProgressBar
+
+target_cols = [
+    "Ticker",
+    "Industry",
+    "Sector",
+    "PE Ratio (Current Year Earnings Estimate)",
+    "Implied Volatility (Puts) (90-Day)",
+    "52-Week High Price",
+    "52-Week Low Price",
+    "Next Expected Quarterly Earnings Report Date",
+    "Annual Dividend (Based on Last Quarter)",
+]
+
+count = 0
+
 
 async def fetch_data(symbol, session):
-    url = f"https://www.alphaquery.com/stock/{symbol}/volatility-option-statistics/90-day/historical-volatility"
+    global count
+    url = f"https://www.alphaquery.com/stock/{symbol}/all-data-variables"
 
     async with session.get(url) as response:
         if response.status != 200:
@@ -27,9 +45,7 @@ async def fetch_data(symbol, session):
         df = pd.read_html(html_string_io)[0]
 
         # Iterate through each row in the DataFrame
-        row_object = {
-            "Symbol": symbol,
-        }
+        row_object = dict()
         for _, row in df.iterrows():
             try:
                 row_object[row[0]] = float(row[1])
@@ -37,15 +53,24 @@ async def fetch_data(symbol, session):
                 row_object[row[0]] = row[1]
         row_object = dict(
             filter(
-                lambda x: x[0] not in ["Volatility Metrics", "Option Statistics"],
+                lambda x: x[0] in target_cols,
                 row_object.items(),
             )
         )
+        row_object["time_stamp"] = datetime.now().isoformat()
 
         # Create a new DataFrame from the row_object
         df = pd.DataFrame([row_object])
 
-        print(f"Scraped data for {symbol}")
+        count += 1
+        printProgressBar(
+            count,
+            len(stock_symbols),
+            prefix="Progress:",
+            suffix=f"Complete, scraped {symbol}",
+            length=50,
+        )
+
         return df
 
 
@@ -98,4 +123,7 @@ if __name__ == "__main__":
             print("Excel file loaded successfully")
             break
 
+    printProgressBar(
+        count, len(stock_symbols), prefix="Progress:", suffix="Complete", length=50
+    )
     asyncio.run(main(stock_symbols))
