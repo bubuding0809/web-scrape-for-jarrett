@@ -20,10 +20,11 @@ target_cols = [
     "Annual Dividend (Based on Last Quarter)",
 ]
 
+# Global variable to keep track of the number of stocks scraped
 count = 0
 
 
-async def fetch_data(symbol, session):
+async def fetch_volatility(symbol: str, session: aiohttp.ClientSession):
     global count
     url = f"https://www.alphaquery.com/stock/{symbol}/all-data-variables"
 
@@ -66,7 +67,7 @@ async def fetch_data(symbol, session):
         printProgressBar(
             count,
             len(stock_symbols),
-            prefix="Progress:",
+            prefix="Volatility progress:",
             suffix=f"Complete, scraped {symbol}",
             length=50,
         )
@@ -74,33 +75,89 @@ async def fetch_data(symbol, session):
         return df
 
 
-async def main(stock_symbols: list[str]):
-    async with aiohttp.ClientSession() as session:
-        tasks = [fetch_data(symbol, session) for symbol in stock_symbols]
-        results = await asyncio.gather(*tasks)
+async def fetch_lastclose(symbol: str, session: aiohttp.ClientSession):
+    global count
 
-    print(f"Scraping complete for {len(results)} symbols")
+    start_timestamp = int(datetime(2023, 1, 1).timestamp())
+    end_timestamp = int(datetime.now().timestamp())
 
-    # Combine the data for all symbols into a single DataFrame
-    combined_data = pd.concat(
-        [df for df in results if df is not None], ignore_index=True
-    )
+    url = f"https://query1.finance.yahoo.com/v7/finance/download/{symbol}?period1={start_timestamp}&period2={end_timestamp}&interval=1d&events=history&includeAdjustedClose=true"
+    async with session.get(url) as response:
+        # Ensure that the request was successful
+        if response.status != 200:
+            print(f"Error fetching data for {symbol}")
+            return None
 
-    # Write the data to an Excel file called AlphaQuery.xlsx
+        # Convert the response to a DataFrame
+        df = pd.read_csv(StringIO(await response.text()))
+
+        # Add the symbol column
+        df["Ticker"] = symbol
+        df["time_stamp"] = datetime.now().isoformat()
+
+        # Select only the Date and Close columns
+        df = df[["Ticker", "Date", "Close", "time_stamp"]]
+
+        # Rename the Close column to Last Close
+        df = df.rename(columns={"Close": "Last Close"})
+
+        count += 1
+        printProgressBar(
+            count,
+            len(stock_symbols),
+            prefix="Last close progress:",
+            suffix=f"Complete, scraped {symbol}",
+            length=50,
+        )
+
+        return df
+
+
+def save_to_sheet(results: list[pd.DataFrame], sheet_name: str):
+    combined = pd.concat([df for df in results if df is not None], ignore_index=True)
+
+    # Write the data back to the Excel file
     while True:
         try:
-            save_path = input(
-                "Enter the path to save the Excel file, (eg: results.xlsx): "
-            )
-            with pd.ExcelWriter(save_path) as writer:
-                combined_data.to_excel(writer, index=False)
-        except PermissionError:
-            print("Please close the Excel file before saving")
+            # Open the Excel file
+            with pd.ExcelWriter(file_path, engine="openpyxl", mode="a") as writer:
+                writer = writer
+
+                # Remove the sheet if it already exists
+                if sheet_name in writer.book.sheetnames:
+                    writer.book.remove(writer.book[sheet_name])
+
+                # Write the DataFrame to the Excel file
+                combined.to_excel(writer, sheet_name=sheet_name, index=False)
         except Exception as e:
-            print(e)
+            print(f"Error writing data to Excel file: {e}")
+            if input("Press enter to try again or type 'exit' to quit: ") == "exit":
+                break
         else:
-            print("Excel file saved successfully")
+            print(f"***Data written to {sheet_name} sheet successfully***\n")
             break
+
+
+async def main(stock_symbols: list[str]):
+    # Scrape volatility data for each symbol
+    async with aiohttp.ClientSession() as session:
+        # Scraping volatility data
+        volatility_data = await asyncio.gather(
+            *[fetch_volatility(symbol, session) for symbol in stock_symbols]
+        )
+        print(f"Volatilty data scraping complete for {len(volatility_data)} symbols")
+        save_to_sheet(volatility_data, "volatility-data")
+
+        # Reset the count
+        global count
+        count = 0
+
+        # Scraping last close data
+        lastclose_data = await asyncio.gather(
+            *[fetch_lastclose(symbol, session) for symbol in stock_symbols]
+        )
+        print(f"Last close data scraping complete for {len(lastclose_data)} symbols")
+        save_to_sheet(lastclose_data, "lastclose-data")
 
 
 if __name__ == "__main__":
@@ -111,19 +168,19 @@ if __name__ == "__main__":
     while True:
         try:
             file_path = input("Enter the path to the Excel file: ")
-            df = pd.read_excel(file_path, sheet_name="Stock List")
-            stock_symbols = df["Symbol"].tolist()
+            if file_path.split(".")[-1] != "xlsx":
+                file_path += ".xlsx"
+
+            df = pd.read_excel(file_path, sheet_name="stocks")
+            stock_symbols = df["Ticker"].tolist()
         except FileNotFoundError:
             print("The path does not exist")
         except KeyError:
-            print("The Excel file does not contain a Stock List tab")
+            print("The Excel file does not contain a tickers tab")
         except Exception as e:
             print(e)
         else:
-            print("Excel file loaded successfully")
+            print("Excel file loaded successfully\n")
             break
 
-    printProgressBar(
-        count, len(stock_symbols), prefix="Progress:", suffix="Complete", length=50
-    )
     asyncio.run(main(stock_symbols))
