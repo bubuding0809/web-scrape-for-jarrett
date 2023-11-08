@@ -25,6 +25,8 @@ count = 0
 
 
 async def fetch_volatility(symbol: str, session: aiohttp.ClientSession):
+    """Fetches the volatility data for the given symbol"""
+
     global count
     url = f"https://www.alphaquery.com/stock/{symbol}/all-data-variables"
 
@@ -58,7 +60,7 @@ async def fetch_volatility(symbol: str, session: aiohttp.ClientSession):
                 row_object.items(),
             )
         )
-        row_object["time_stamp"] = datetime.now().isoformat()
+        row_object["time_stamp"] = datetime.now()
 
         # Create a new DataFrame from the row_object
         df = pd.DataFrame([row_object])
@@ -76,6 +78,8 @@ async def fetch_volatility(symbol: str, session: aiohttp.ClientSession):
 
 
 async def fetch_lastclose(symbol: str, session: aiohttp.ClientSession):
+    """Fetches the last close data for the given symbol"""
+
     global count
 
     start_timestamp = int(datetime(2023, 1, 1).timestamp())
@@ -93,7 +97,8 @@ async def fetch_lastclose(symbol: str, session: aiohttp.ClientSession):
 
         # Add the symbol column
         df["Ticker"] = symbol
-        df["time_stamp"] = datetime.now().isoformat()
+        df["time_stamp"] = datetime.now()
+        df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m-%d").dt.date
 
         # Select only the Date and Close columns
         df = df[["Ticker", "Date", "Close", "time_stamp"]]
@@ -114,21 +119,36 @@ async def fetch_lastclose(symbol: str, session: aiohttp.ClientSession):
 
 
 def save_to_sheet(results: list[pd.DataFrame], sheet_name: str):
+    """Saves the results to the desired sheet in the Excel file"""
+
     combined = pd.concat([df for df in results if df is not None], ignore_index=True)
 
     # Write the data back to the Excel file
     while True:
         try:
             # Open the Excel file
-            with pd.ExcelWriter(file_path, engine="openpyxl", mode="a") as writer:
-                writer = writer
-
+            with pd.ExcelWriter(
+                file_path,
+                engine="openpyxl",
+                mode="a",
+            ) as writer:
                 # Remove the sheet if it already exists
                 if sheet_name in writer.book.sheetnames:
                     writer.book.remove(writer.book[sheet_name])
 
                 # Write the DataFrame to the Excel file
                 combined.to_excel(writer, sheet_name=sheet_name, index=False)
+
+                resize_columns(writer, sheet_name)
+
+                # Coerce the date/time columns to the correct format for the lastclose-data sheet
+                if sheet_name == "lastclose-data":
+                    ws = writer.sheets[sheet_name]
+
+                    # format each cell in the Date column to the correct format
+                    for cell in ws["B:B"]:
+                        cell.number_format = "dd/mm/yyyy;@"
+
         except Exception as e:
             print(f"Error writing data to Excel file: {e}")
             if input("Press enter to try again or type 'exit' to quit: ") == "exit":
@@ -136,6 +156,22 @@ def save_to_sheet(results: list[pd.DataFrame], sheet_name: str):
         else:
             print(f"***Data written to {sheet_name} sheet successfully***\n")
             break
+
+
+def resize_columns(writer: pd.ExcelWriter, sheet_name: str):
+    """Set all columns of the sheet to autofit"""
+
+    columns = writer.sheets[sheet_name].columns
+    for column in columns:
+        max_length = 0
+        column_name = column[0].column_letter
+
+        # Find the length of the longest string in the column
+        for cell in column:
+            max_length = max(max_length, len(str(cell.value)))
+
+        # Set the column width to the length of the longest string + 2
+        writer.sheets[sheet_name].column_dimensions[column_name].width = max_length + 2
 
 
 async def main(stock_symbols: list[str]):
