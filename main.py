@@ -1,12 +1,17 @@
-from datetime import datetime
+import multiprocessing
+from multiprocessing.managers import ValueProxy
 import os
+import threading
+import time
+from typing import List
 import aiohttp
 import asyncio
 import pandas as pd
+from datetime import datetime
 from io import StringIO
 from bs4 import BeautifulSoup
-
-from progress import printProgressBar
+from utils import printProgressBar, save_to_sheet
+from stocks import INDICES, fetch_stocks
 
 target_cols = [
     "Ticker",
@@ -20,19 +25,19 @@ target_cols = [
     "Annual Dividend (Based on Last Quarter)",
 ]
 
-# Global variable to keep track of the number of stocks scraped
-count = 0
 
-
-async def fetch_volatility(symbol: str, session: aiohttp.ClientSession):
+async def fetch_volatility(
+    symbol: str,
+    session: aiohttp.ClientSession,
+    shared_count: ValueProxy[int],
+    count_lock: threading.Lock,
+):
     """Fetches the volatility data for the given symbol"""
 
-    global count
     url = f"https://www.alphaquery.com/stock/{symbol}/all-data-variables"
 
     async with session.get(url) as response:
         if response.status != 200:
-            print(f"Error fetching data for {symbol}")
             return None
 
         html = await response.text()
@@ -40,7 +45,6 @@ async def fetch_volatility(symbol: str, session: aiohttp.ClientSession):
         table = soup.find("table")
 
         if not table:
-            print(f"Could not find table for {symbol}")
             return None
 
         # Wrap the HTML string in a StringIO object
@@ -65,22 +69,23 @@ async def fetch_volatility(symbol: str, session: aiohttp.ClientSession):
         # Create a new DataFrame from the row_object
         df = pd.DataFrame([row_object])
 
-        count += 1
+        # increment the shared count by accessing the lock
+        count_lock.acquire()
+        shared_count.value += 1
         printProgressBar(
-            count,
-            len(stock_symbols),
-            prefix="Volatility progress:",
-            suffix=f"Complete, scraped {symbol}",
+            shared_count.value,
+            631,
+            prefix="Progress:",
+            suffix="Complete",
             length=50,
         )
+        count_lock.release()
 
         return df
 
 
 async def fetch_lastclose(symbol: str, session: aiohttp.ClientSession):
     """Fetches the last close data for the given symbol"""
-
-    global count
 
     start_timestamp = int(datetime(2023, 1, 1).timestamp())
     end_timestamp = int(datetime.now().timestamp())
@@ -89,7 +94,6 @@ async def fetch_lastclose(symbol: str, session: aiohttp.ClientSession):
     async with session.get(url) as response:
         # Ensure that the request was successful
         if response.status != 200:
-            print(f"Error fetching data for {symbol}")
             return None
 
         # Convert the response to a DataFrame
@@ -106,94 +110,68 @@ async def fetch_lastclose(symbol: str, session: aiohttp.ClientSession):
         # Rename the Close column to Last Close
         df = df.rename(columns={"Close": "Last Close"})
 
-        count += 1
-        printProgressBar(
-            count,
-            len(stock_symbols),
-            prefix="Last close progress:",
-            suffix=f"Complete, scraped {symbol}",
-            length=50,
-        )
-
         return df
 
 
-def save_to_sheet(results: list[pd.DataFrame], sheet_name: str):
-    """Saves the results to the desired sheet in the Excel file"""
+def process_chunk(args):
+    chunk, shared_count, count_lock = args
 
-    combined = pd.concat([df for df in results if df is not None], ignore_index=True)
+    async def fetch_chunk():
+        async with aiohttp.ClientSession() as session:
+            volatlity_chunk: List[pd.DataFrame] = await asyncio.gather(
+                *[
+                    fetch_volatility(symbol, session, shared_count, count_lock)
+                    for symbol in chunk
+                ]
+            )
 
-    # Write the data back to the Excel file
-    while True:
-        try:
-            # Open the Excel file
-            with pd.ExcelWriter(
-                file_path,
-                engine="openpyxl",
-                mode="a",
-            ) as writer:
-                # Remove the sheet if it already exists
-                if sheet_name in writer.book.sheetnames:
-                    writer.book.remove(writer.book[sheet_name])
+            last_close_chunk: List[pd.DataFrame] = await asyncio.gather(
+                *[fetch_lastclose(symbol, session) for symbol in chunk]
+            )
 
-                # Write the DataFrame to the Excel file
-                combined.to_excel(writer, sheet_name=sheet_name, index=False)
+        return volatlity_chunk, last_close_chunk
 
-                resize_columns(writer, sheet_name)
-
-                # Coerce the date/time columns to the correct format for the lastclose-data sheet
-                if sheet_name == "lastclose-data":
-                    ws = writer.sheets[sheet_name]
-
-                    # format each cell in the Date column to the correct format
-                    for cell in ws["B:B"]:
-                        cell.number_format = "dd/mm/yyyy;@"
-
-        except Exception as e:
-            print(f"Error writing data to Excel file: {e}")
-            if input("Press enter to try again or type 'exit' to quit: ") == "exit":
-                break
-        else:
-            print(f"***Data written to {sheet_name} sheet successfully***\n")
-            break
+    return asyncio.run(fetch_chunk())
 
 
-def resize_columns(writer: pd.ExcelWriter, sheet_name: str):
-    """Set all columns of the sheet to autofit"""
+async def main(file_path: str):
+    start_time = time.time()
 
-    columns = writer.sheets[sheet_name].columns
-    for column in columns:
-        max_length = 0
-        column_name = column[0].column_letter
-
-        # Find the length of the longest string in the column
-        for cell in column:
-            max_length = max(max_length, len(str(cell.value)))
-
-        # Set the column width to the length of the longest string + 2
-        writer.sheets[sheet_name].column_dimensions[column_name].width = max_length + 2
-
-
-async def main(stock_symbols: list[str]):
-    # Scrape volatility data for each symbol
+    # Fetch stock symbols from indices
     async with aiohttp.ClientSession() as session:
-        # Scraping volatility data
-        volatility_data = await asyncio.gather(
-            *[fetch_volatility(symbol, session) for symbol in stock_symbols]
+        index_dfs = await asyncio.gather(
+            *[fetch_stocks(index, session) for index in INDICES]
         )
-        print(f"Volatilty data scraping complete for {len(volatility_data)} symbols")
-        save_to_sheet(volatility_data, "volatility-data")
 
-        # Reset the count
-        global count
-        count = 0
+    stocks_df = save_to_sheet(index_dfs, "stocks_data", file_path)
+    stock_symbols = stocks_df["Symbol"].unique().tolist()
 
-        # Scraping last close data
-        lastclose_data = await asyncio.gather(
-            *[fetch_lastclose(symbol, session) for symbol in stock_symbols]
-        )
-        print(f"Last close data scraping complete for {len(lastclose_data)} symbols")
-        save_to_sheet(lastclose_data, "lastclose-data")
+    # Create a multiprocessing pool to process the each chunk of stock symbols in parallel
+    with multiprocessing.Manager() as manager:
+        shared_count = manager.Value("i", 0)
+        count_lock = manager.Lock()
+
+        chunk_size = 10
+        chunks = [
+            (stock_symbols[i : i + chunk_size], shared_count, count_lock)
+            for i in range(0, len(stock_symbols), chunk_size)
+        ]
+        with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
+            results = pool.map(
+                process_chunk,
+                chunks,
+            )
+
+    print(f"Total time taken: {time.time() - start_time} seconds")
+
+    volatility_data: List[pd.DataFrame] = []
+    last_close_data: List[pd.DataFrame] = []
+    for volatlity_chunk, lastclose_chunk in results:
+        volatility_data.extend(volatlity_chunk)
+        last_close_data.extend(lastclose_chunk)
+
+    save_to_sheet(volatility_data, "volatility_data", file_path)
+    save_to_sheet(last_close_data, "lastclose_data", file_path)
 
 
 if __name__ == "__main__":
@@ -206,9 +184,6 @@ if __name__ == "__main__":
             file_path = input("Enter the path to the Excel file: ")
             if file_path.split(".")[-1] != "xlsx":
                 file_path += ".xlsx"
-
-            df = pd.read_excel(file_path, sheet_name="stocks")
-            stock_symbols = df["Ticker"].tolist()
         except FileNotFoundError:
             print("The path does not exist")
         except KeyError:
@@ -219,4 +194,4 @@ if __name__ == "__main__":
             print("Excel file loaded successfully\n")
             break
 
-    asyncio.run(main(stock_symbols))
+    asyncio.run(main(file_path))
