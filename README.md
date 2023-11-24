@@ -55,3 +55,19 @@ To run the project, follow these stepas:
 ```bash
 > python main.py
 ```
+
+## Packaging the project for distribution
+
+1. Install PyInstaller by typing.
+
+```bash
+> pip install pyinstaller
+```
+
+2. Package the project by typing.
+
+```bash
+> pyinstaller --noconfirm --onedir --console  "path/to/project>/main.py"
+```
+
+3. The packaged project will be available in the `dist` directory.
