@@ -184,6 +184,7 @@ async def main(file_path: str):
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     # Read the Excel file and extract the stock symbols from the Stock List tab
     # Set current working directory to the directory of this file
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
