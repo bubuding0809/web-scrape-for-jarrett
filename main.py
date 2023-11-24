@@ -2,7 +2,6 @@ import multiprocessing
 from multiprocessing.managers import ValueProxy
 import os
 import threading
-import time
 from typing import List
 import aiohttp
 import asyncio
@@ -31,10 +30,23 @@ async def fetch_volatility(
     session: aiohttp.ClientSession,
     shared_count: ValueProxy[int],
     count_lock: threading.Lock,
+    total_symbols: int,
 ):
     """Fetches the volatility data for the given symbol"""
 
     url = f"https://www.alphaquery.com/stock/{symbol}/all-data-variables"
+
+    # increment the shared count by accessing the lock
+    count_lock.acquire()
+    shared_count.value += 1
+    printProgressBar(
+        shared_count.value,
+        total_symbols,
+        prefix="Volatility Data Progress:",
+        suffix=f"Complete {shared_count.value} of {total_symbols}",
+        length=50,
+    )
+    count_lock.release()
 
     async with session.get(url) as response:
         if response.status != 200:
@@ -69,18 +81,6 @@ async def fetch_volatility(
         # Create a new DataFrame from the row_object
         df = pd.DataFrame([row_object])
 
-        # increment the shared count by accessing the lock
-        count_lock.acquire()
-        shared_count.value += 1
-        printProgressBar(
-            shared_count.value,
-            631,
-            prefix="Progress:",
-            suffix="Complete",
-            length=50,
-        )
-        count_lock.release()
-
         return df
 
 
@@ -114,13 +114,15 @@ async def fetch_lastclose(symbol: str, session: aiohttp.ClientSession):
 
 
 def process_chunk(args):
-    chunk, shared_count, count_lock = args
+    chunk, shared_count, count_lock, total_symbols = args
 
     async def fetch_chunk():
         async with aiohttp.ClientSession() as session:
             volatlity_chunk: List[pd.DataFrame] = await asyncio.gather(
                 *[
-                    fetch_volatility(symbol, session, shared_count, count_lock)
+                    fetch_volatility(
+                        symbol, session, shared_count, count_lock, total_symbols
+                    )
                     for symbol in chunk
                 ]
             )
@@ -135,16 +137,20 @@ def process_chunk(args):
 
 
 async def main(file_path: str):
-    start_time = time.time()
-
     # Fetch stock symbols from indices
     async with aiohttp.ClientSession() as session:
         index_dfs = await asyncio.gather(
             *[fetch_stocks(index, session) for index in INDICES]
         )
 
+    print("Number of stocks in each index:")
+    for index_df in index_dfs:
+        # print the number of stocks in each index
+        print(f"{index_df['Index'][0]}: {len(index_df)}")
+
     stocks_df = save_to_sheet(index_dfs, "stocks_data", file_path)
     stock_symbols = stocks_df["Symbol"].unique().tolist()
+    print(f"Scraping data for {len(stock_symbols)} number of unique stocks:\n")
 
     # Create a multiprocessing pool to process the each chunk of stock symbols in parallel
     with multiprocessing.Manager() as manager:
@@ -153,7 +159,12 @@ async def main(file_path: str):
 
         chunk_size = 10
         chunks = [
-            (stock_symbols[i : i + chunk_size], shared_count, count_lock)
+            (
+                stock_symbols[i : i + chunk_size],
+                shared_count,
+                count_lock,
+                len(stock_symbols),
+            )
             for i in range(0, len(stock_symbols), chunk_size)
         ]
         with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
@@ -161,8 +172,6 @@ async def main(file_path: str):
                 process_chunk,
                 chunks,
             )
-
-    print(f"Total time taken: {time.time() - start_time} seconds")
 
     volatility_data: List[pd.DataFrame] = []
     last_close_data: List[pd.DataFrame] = []
