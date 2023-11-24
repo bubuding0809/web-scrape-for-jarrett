@@ -26,7 +26,12 @@ To install Python 3.11, follow these steps:
 
 To run the project, follow these steps:
 
-1. Open a new command prompt window.
+1. Open a new command prompt window and navigate to project directory.
+
+```bash
+> cd path/to/project
+```
+
 2. Create a new virtual environment by typing.
 
 ```bash
